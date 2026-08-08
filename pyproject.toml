@@ -1,0 +1,19 @@
+[project]
+name = "digital-locket-lite"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "argon2-cffi>=25.1.0",
+    "cryptography>=50.0.0",
+    "fastapi>=0.141.1",
+    "python-multipart>=0.0.32",
+    "tzdata>=2026.3",
+    "uvicorn>=0.52.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.2",
+]
