@@ -206,6 +206,9 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Local vault storage (encrypted .enc files) and shredding artifacts
+/vaults/
+
 # PyPI configuration file
 .pypirc
 
