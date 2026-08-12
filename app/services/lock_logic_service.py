@@ -3,7 +3,9 @@ import os
 from pathlib import Path
 
 import argon2.low_level
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
+
+from app.core.logger import app_logger
 
 
 def derive_key(passphrase: str, salt: bytes) -> bytes:
@@ -19,6 +21,21 @@ def derive_key(passphrase: str, salt: bytes) -> bytes:
     )
     # Fernet requires a 32-byte URL-safe base64-encoded key
     return base64.urlsafe_b64encode(raw_key)
+
+def encrypt_bytes(plaintext: bytes, passphrase: str) -> bytes:
+    """Encrypt bytes and return the 16-byte salt prepended to the Fernet ciphertext."""
+    salt = os.urandom(16)
+    key = derive_key(passphrase, salt)
+    return salt + Fernet(key).encrypt(plaintext)
+
+def decrypt_bytes(data: bytes, passphrase: str) -> bytes:
+    """Decrypt a salt+ciphertext blob for a given passphrase."""
+    salt, ciphertext = data[:16], data[16:]
+    try:
+        key = derive_key(passphrase, salt)
+        return Fernet(key).decrypt(ciphertext)
+    except InvalidToken as e:
+        raise ValueError("Wrong passphrase or corrupted data") from e
 
 def shred_and_delete(file_path: Path):
     """
@@ -61,13 +78,8 @@ def lock_files(source_dir: str, vault_dir: str, passphrase: str):
         with open(file_path, "rb") as f:
             plaintext = f.read()
 
-        # 2. Generate unique salt and derive key
-        salt = os.urandom(16)
-        key = derive_key(passphrase, salt)
-        
-        # 3. Encrypt data
-        fernet = Fernet(key)
-        ciphertext = fernet.encrypt(plaintext)
+        # 2+3. Encrypt data with a fresh salt (prepended to the ciphertext)
+        encrypted = encrypt_bytes(plaintext, passphrase)
 
         # 4. Store [Salt (16 bytes) + Ciphertext] into vault (preserving relative structure)
         rel_path = file_path.relative_to(source)
@@ -75,7 +87,7 @@ def lock_files(source_dir: str, vault_dir: str, passphrase: str):
         vault_file_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(vault_file_path, "wb") as vf:
-            vf.write(salt + ciphertext)
+            vf.write(encrypted)
 
         # 5. Ruin and delete original file
         shred_and_delete(file_path)
@@ -99,25 +111,22 @@ def show_files(vault_dir: str, target_dir: str, passphrase: str):
 
     for enc_file_path in enc_files:
         print(f"🔓 Unlocking: {enc_file_path.relative_to(vault)}")
-        
+
         with open(enc_file_path, "rb") as vf:
             data = vf.read()
 
-        # Separate salt (first 16 bytes) and ciphertext
-        salt = data[:16]
-        ciphertext = data[16:]
-
         try:
             # Re-derive key and decrypt
-            key = derive_key(passphrase, salt)
-            fernet = Fernet(key)
-            plaintext = fernet.decrypt(ciphertext)
-        except Exception as e:
-            print(f"❌ Failed to decrypt {enc_file_path.name}. Wrong passphrase or corrupted data? Details: {e}")
+            plaintext = decrypt_bytes(data, passphrase)
+        except ValueError as e:
+            app_logger.error("Failed to decrypt %s. %s", enc_file_path.name, e)
             continue
+        except Exception as e:
+            app_logger.error("Failed to decrypt %s. Unexpected error: %s", enc_file_path.name, e)
+            raise RuntimeError(f"Failed to decrypt {enc_file_path.name}. Unexpected error: {e}")
 
         # Restore to original directory structure (stripping the '.enc' suffix)
-        rel_path = enc_file_path.relative_to(vault).with_suffix('') 
+        rel_path = enc_file_path.relative_to(vault).with_suffix('')
         restored_file_path = target / rel_path
         restored_file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -143,6 +152,6 @@ if __name__ == "__main__":
 
     # print("\n--- STEP 2: SHOWING (DECRYPTING) FILES ---")
     # show_files(VAULT_FOLDER, RESTORE_FOLDER, PASSPHRASE)
-    
+
 
     print(Path(VAULT_FOLDER).absolute())
