@@ -1,9 +1,9 @@
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class UserLocks(BaseModel):
-    passphrase: str = Field(default="test123")
+    passphrase: str
     
 
 router = APIRouter()
