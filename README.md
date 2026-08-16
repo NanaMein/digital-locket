@@ -11,9 +11,20 @@ No tech skills needed. No terminal. No "install Python" steps. FastAPI runs the 
 ## How it feels to use
 
 1. **First run** — open the app, set your passphrase. The vault is now yours.
-2. **Drag & drop** — drop files in. They're encrypted on the spot and the originals are securely shredded.
-3. **Later runs** — type your passphrase. See your files, preview or download them, drop in more.
-4. Done for the day? Just close the tab. The session locks itself — if you stop touching the app, it signs you out on its own.
+2. **Drag & drop** — drop files in. They land in your **Locket Files** folder (on the USB, right next to the app) and wait there.
+3. **Encrypt all** — one button. Every file in the folder is encrypted into the vault, and only after each succeeds is the original securely shredded.
+4. **Later runs** — type your passphrase, see what's locked, and press **Open vault folder** to decrypt everything back into the same Locket Files folder (Explorer opens right there).
+5. Done for the day? Just close the tab. The session locks itself — if you stop touching the app, it signs you out on its own.
+
+### Where your files live
+
+```
+USB root (E:\)
+├── Locket Files\      ← your files: dropped here, encrypted from here, unloaded back here
+└── digital-locket\    ← the app (you never need to open this)
+```
+
+The Locket Files folder is the single source of truth — you can even browse it directly on the USB, no UI needed. Files bypassing the UI (copy-pasted in while locked) are left alone, included in the next Encrypt all, and never overwritten by an unload.
 
 ## Security model
 
@@ -48,7 +59,7 @@ The long-term plan is a USB "digital locket": Python and this app bundled onto t
 
 ## Current status
 
-Early stage. Working today: owner setup, passphrase login with expiring sessions, drag-and-drop encryption, file listing, and in-browser preview/download. Not yet done: the USB auto-start packaging and hardened error handling.
+Early stage. Working today: owner setup, passphrase login with expiring sessions, drop-to-folder staging, one-button encryption, file listing, and folder unload that opens Explorer. Not yet done: the USB auto-start packaging and hardened error handling.
 
 ## Tech stack
 
