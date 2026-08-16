@@ -1,10 +1,11 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
-from app.routers import auth, vault
+from app.routers import vault
 
 app = FastAPI()
-app.include_router(auth.router)
 app.include_router(vault.router)
+app.mount("/", StaticFiles(directory="app/static", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn

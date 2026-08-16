@@ -37,6 +37,25 @@ def decrypt_bytes(data: bytes, passphrase: str) -> bytes:
     except InvalidToken as e:
         raise ValueError("Wrong passphrase or corrupted data") from e
 
+OWNER_CONSTANT = b"digital-locket-owner"
+
+
+def create_owner_marker(passphrase: str) -> str:
+    """Return a URL-safe base64 owner verifier; the passphrase itself is never stored."""
+    return base64.urlsafe_b64encode(encrypt_bytes(OWNER_CONSTANT, passphrase)).decode("ascii")
+
+
+def verify_owner_marker(marker_b64: str, passphrase: str) -> bool:
+    """Return True when the passphrase can decrypt the owner verifier."""
+    try:
+        data = base64.urlsafe_b64decode(marker_b64)
+    except (ValueError, TypeError):
+        return False
+    try:
+        return decrypt_bytes(data, passphrase) == OWNER_CONSTANT
+    except ValueError:
+        return False
+
 def shred_and_delete(file_path: Path):
     """
     Overwrites the file contents with random garbage data ('ruining' it) 
@@ -135,23 +154,77 @@ def show_files(vault_dir: str, target_dir: str, passphrase: str):
 
     print("\n✅ SHOW complete: Files successfully decrypted and restored.")
 
-# ==================== EXAMPLE USAGE ====================
-if __name__ == "__main__":
-    PASSPHRASE = "my_super_secret_passphrase123"
-    SOURCE_FOLDER = "./my_secret_docs"
-    VAULT_FOLDER = "./my_vault"
-    RESTORE_FOLDER = "./my_restored_docs"
+def unload_files(vault_dir: str, target_dir: str, passphrase: str) -> tuple[int, int]:
+    """Decrypt every .enc from the vault into target_dir without overwriting existing files.
 
-    # # --- Setup a dummy file to test ---
-    # os.makedirs(SOURCE_FOLDER, exist_ok=True)
-    # with open(os.path.join(SOURCE_FOLDER, "confidential.txt"), "w") as f:
-    #     f.write("Top Secret Passwords and Notes: 12345")
+    Returns (unloaded, skipped). Skipped files already exist in the target (e.g. a file
+    placed there manually) and are left untouched.
+    """
+    vault = Path(vault_dir)
+    target = Path(target_dir)
+    target.mkdir(parents=True, exist_ok=True)
 
-    # print("--- STEP 1: LOCKING FILES ---")
-    # lock_files(SOURCE_FOLDER, VAULT_FOLDER, PASSPHRASE)
+    if not vault.exists():
+        return 0, 0
 
-    # print("\n--- STEP 2: SHOWING (DECRYPTING) FILES ---")
-    # show_files(VAULT_FOLDER, RESTORE_FOLDER, PASSPHRASE)
+    unloaded = 0
+    skipped = 0
+    for enc_file in sorted(vault.rglob("*.enc")):
+        rel_path = enc_file.relative_to(vault).with_suffix("")
+        out_file = target / rel_path
+        if out_file.exists():
+            app_logger.warning("Skipped %s: already present in %s", out_file.name, target)
+            skipped += 1
+            continue
+        try:
+            plaintext = decrypt_bytes(enc_file.read_bytes(), passphrase)
+        except ValueError as e:
+            app_logger.error("Failed to unload %s. %s", enc_file.name, e)
+            skipped += 1
+            continue
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(plaintext)
+        unloaded += 1
+    return unloaded, skipped
 
 
-    print(Path(VAULT_FOLDER).absolute())
+def lock_folder_files(
+    source_dir: str, vault_dir: str, passphrase: str
+) -> tuple[list[tuple[str, int]], list[str]]:
+    """Encrypt every file in source_dir into vault_dir, shredding each original on success.
+
+    Returns (locked, skipped) where locked is a list of (name, plaintext_size) and skipped
+    holds files whose vault target already exists — left in place so an existing encrypted
+    file is never overwritten.
+    """
+    source = Path(source_dir)
+    vault = Path(vault_dir)
+    vault.mkdir(parents=True, exist_ok=True)
+
+    locked: list[tuple[str, int]] = []
+    skipped: list[str] = []
+    if not source.is_dir():
+        return locked, skipped
+
+    for file_path in sorted(p for p in source.iterdir() if p.is_file()):
+        name = file_path.name
+        if (vault / f"{name}.enc").exists():
+            app_logger.warning("Skipped %s: vault already holds %s.enc", name, name)
+            skipped.append(name)
+            continue
+        try:
+            plaintext = file_path.read_bytes()
+        except OSError as e:
+            app_logger.error("Failed to read %s. %s", name, e)
+            skipped.append(name)
+            continue
+        try:
+            (vault / f"{name}.enc").write_bytes(encrypt_bytes(plaintext, passphrase))
+        except OSError as e:
+            app_logger.error("Failed to encrypt %s. %s", name, e)
+            skipped.append(name)
+            continue
+        shred_and_delete(file_path)
+        locked.append((name, len(plaintext)))
+        app_logger.info("Locked %s", name)
+    return locked, skipped
