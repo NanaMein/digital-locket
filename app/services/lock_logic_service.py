@@ -1,5 +1,9 @@
 import base64
+import io
 import os
+import shutil
+import uuid
+import zipfile
 from pathlib import Path
 
 import argon2.low_level
@@ -154,24 +158,97 @@ def show_files(vault_dir: str, target_dir: str, passphrase: str):
 
     print("\n✅ SHOW complete: Files successfully decrypted and restored.")
 
-def unload_files(vault_dir: str, target_dir: str, passphrase: str) -> tuple[int, int]:
-    """Decrypt every .enc from the vault into target_dir without overwriting existing files.
+def _clear_folder(path: Path) -> None:
+    """Delete every file inside path and prune the empty subdirectories (root kept)."""
+    if not path.is_dir():
+        return
+    for child in path.rglob("*"):
+        if child.is_file():
+            child.unlink(missing_ok=True)
+    for directory in sorted((p for p in path.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
 
-    Returns (unloaded, skipped). Skipped files already exist in the target (e.g. a file
-    placed there manually) and are left untouched.
+
+def _archive_dir(path: Path) -> tuple[int, bytes]:
+    """Zip a directory tree into memory, returning (total_content_size, zip_bytes)."""
+    buffer = io.BytesIO()
+    total_size = 0
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file_path in sorted(p for p in path.rglob("*") if p.is_file()):
+            rel = file_path.relative_to(path).as_posix()
+            zf.write(file_path, arcname=rel)
+            total_size += file_path.stat().st_size
+    return total_size, buffer.getvalue()
+
+
+def _shred_tree(path: Path) -> None:
+    """Shred every file under path (deepest first), then remove the empty directories."""
+    for child in sorted(path.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if child.is_file():
+            shred_and_delete(child)
+        elif child.is_dir():
+            try:
+                child.rmdir()
+            except OSError:
+                pass
+    try:
+        path.rmdir()
+    except OSError:
+        pass
+
+
+def _extract_folder(blob: bytes, out_dir: Path) -> bool:
+    """Extract an archived folder blob into out_dir atomically. Returns True on success."""
+    tmp = out_dir.parent / f".locket-tmp-{uuid.uuid4().hex}"
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            for member in zf.namelist():
+                if member.startswith("/") or ":" in member or ".." in Path(member).parts:
+                    return False
+            zf.extractall(tmp)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for child in tmp.iterdir():
+            shutil.move(str(child), out_dir / child.name)
+        return True
+    except (OSError, zipfile.BadZipFile, ValueError, RuntimeError):
+        app_logger.error("Failed to extract folder into %s", out_dir)
+        return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def unload_files(
+    vault_dir: str, target_dir: str, passphrase: str, clean: bool = False
+) -> tuple[int, int]:
+    """Decrypt every .enc from the vault into target_dir.
+
+    When clean=True the target folder is emptied first, so freshly decrypted files always
+    land instead of being skipped by an older copy. File blobs (vaults/*.enc) are written as
+    files; folder blobs (vaults/folders/*.enc) are extracted back to a directory of the same
+    name, restoring contents and inner structure.
+
+    Returns (unloaded, skipped). With clean=True, skipped counts only entries that could not
+    be decrypted/restored. With clean=False, entries already present in the target are left
+    untouched and counted as skipped.
     """
     vault = Path(vault_dir)
     target = Path(target_dir)
     target.mkdir(parents=True, exist_ok=True)
+
+    if clean:
+        _clear_folder(target)
 
     if not vault.exists():
         return 0, 0
 
     unloaded = 0
     skipped = 0
-    for enc_file in sorted(vault.rglob("*.enc")):
-        rel_path = enc_file.relative_to(vault).with_suffix("")
-        out_file = target / rel_path
+
+    for enc_file in sorted(vault.glob("*.enc")):
+        out_file = target / enc_file.stem
         if out_file.exists():
             app_logger.warning("Skipped %s: already present in %s", out_file.name, target)
             skipped += 1
@@ -182,49 +259,107 @@ def unload_files(vault_dir: str, target_dir: str, passphrase: str) -> tuple[int,
             app_logger.error("Failed to unload %s. %s", enc_file.name, e)
             skipped += 1
             continue
-        out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_bytes(plaintext)
         unloaded += 1
+
+    folders_vault = vault / "folders"
+    if folders_vault.is_dir():
+        for enc_file in sorted(folders_vault.glob("*.enc")):
+            out_dir = target / enc_file.stem
+            if out_dir.exists():
+                app_logger.warning("Skipped folder %s: already present in %s", out_dir.name, target)
+                skipped += 1
+                continue
+            try:
+                blob = decrypt_bytes(enc_file.read_bytes(), passphrase)
+            except ValueError as e:
+                app_logger.error("Failed to unload %s. %s", enc_file.name, e)
+                skipped += 1
+                continue
+            if _extract_folder(blob, out_dir):
+                unloaded += 1
+            else:
+                skipped += 1
+
     return unloaded, skipped
 
 
 def lock_folder_files(
     source_dir: str, vault_dir: str, passphrase: str
 ) -> tuple[list[tuple[str, int]], list[str]]:
-    """Encrypt every file in source_dir into vault_dir, shredding each original on success.
+    """Encrypt every file and top-level folder in source_dir into vault_dir, shredding each original on success.
 
-    Returns (locked, skipped) where locked is a list of (name, plaintext_size) and skipped
-    holds files whose vault target already exists — left in place so an existing encrypted
-    file is never overwritten.
+    Files become vaults/<name>.enc; a top-level folder is archived to a single blob stored as
+    vaults/folders/<name>.enc, so the vault always knows a folder from a file of the same name.
+    Always re-encrypts fresh (overwriting any existing .enc) and removes stale .enc entries whose
+    plaintext is no longer in the folder — the vault mirrors the folder. With an empty folder,
+    nothing is touched.
+
+    Returns (locked, failed) where locked is a list of (name, plaintext_size) and failed holds
+    entries that could not be read/archived/encrypted; those are left in place, never shredded.
     """
     source = Path(source_dir)
     vault = Path(vault_dir)
     vault.mkdir(parents=True, exist_ok=True)
 
     locked: list[tuple[str, int]] = []
-    skipped: list[str] = []
+    failed: list[str] = []
     if not source.is_dir():
-        return locked, skipped
+        return locked, failed
 
-    for file_path in sorted(p for p in source.iterdir() if p.is_file()):
-        name = file_path.name
-        if (vault / f"{name}.enc").exists():
-            app_logger.warning("Skipped %s: vault already holds %s.enc", name, name)
-            skipped.append(name)
-            continue
-        try:
-            plaintext = file_path.read_bytes()
-        except OSError as e:
-            app_logger.error("Failed to read %s. %s", name, e)
-            skipped.append(name)
-            continue
-        try:
-            (vault / f"{name}.enc").write_bytes(encrypt_bytes(plaintext, passphrase))
-        except OSError as e:
-            app_logger.error("Failed to encrypt %s. %s", name, e)
-            skipped.append(name)
-            continue
-        shred_and_delete(file_path)
-        locked.append((name, len(plaintext)))
-        app_logger.info("Locked %s", name)
-    return locked, skipped
+    entries = sorted(source.iterdir())
+    names = [entry.name for entry in entries]
+    if not names:
+        return locked, failed
+
+    for entry in entries:
+        name = entry.name
+        if entry.is_file():
+            try:
+                plaintext = entry.read_bytes()
+            except OSError as e:
+                app_logger.error("Failed to read %s. %s", name, e)
+                failed.append(name)
+                continue
+            try:
+                (vault / f"{name}.enc").write_bytes(encrypt_bytes(plaintext, passphrase))
+            except OSError as e:
+                app_logger.error("Failed to encrypt %s. %s", name, e)
+                failed.append(name)
+                continue
+            shred_and_delete(entry)
+            locked.append((name, len(plaintext)))
+            app_logger.info("Locked %s", name)
+        elif entry.is_dir():
+            try:
+                total_size, blob = _archive_dir(entry)
+            except OSError as e:
+                app_logger.error("Failed to archive %s. %s", name, e)
+                failed.append(name)
+                continue
+            folders_vault = vault / "folders"
+            folders_vault.mkdir(parents=True, exist_ok=True)
+            try:
+                (folders_vault / f"{name}.enc").write_bytes(encrypt_bytes(blob, passphrase))
+            except OSError as e:
+                app_logger.error("Failed to encrypt folder %s. %s", name, e)
+                failed.append(name)
+                continue
+            _shred_tree(entry)
+            locked.append((name, total_size))
+            app_logger.info("Locked folder %s (%d bytes)", name, total_size)
+
+    for enc in sorted(vault.glob("*.enc")):
+        if enc.stem not in names:
+            enc.unlink(missing_ok=True)
+            app_logger.info("Removed stale %s", enc.name)
+    folders_vault = vault / "folders"
+    if folders_vault.is_dir():
+        for enc in sorted(folders_vault.glob("*.enc")):
+            if enc.stem not in names:
+                enc.unlink(missing_ok=True)
+                app_logger.info("Removed stale folder %s", enc.name)
+        if not any(folders_vault.iterdir()):
+            folders_vault.rmdir()
+
+    return locked, failed

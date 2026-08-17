@@ -26,20 +26,27 @@
     <section id="app-screen" class="screen hidden">
       <header class="topbar">
         <span class="brand small">digital&#8211;locket</span>
-        <button id="logout-button" class="ghost">Lock again</button>
+        <span id="status-badge" class="badge open">Open</span>
       </header>
 
       <div id="drop-zone" class="dropzone">
-        <p class="dropzone-title">Drag &amp; drop files here</p>
+        <p class="dropzone-title">Drag &amp; drop files or folders here</p>
         <p class="dropzone-hint">They land in your Locket Files folder, ready to be locked</p>
         <input id="file-input" type="file" multiple hidden />
       </div>
 
+      <p id="drag-note" class="muted hidden">This browser can't drag folders in. Use the "Choose a folder" button instead.</p>
+
       <div class="row">
         <h2>Waiting to be locked</h2>
-        <button id="encrypt-button" class="primary">Encrypt all</button>
+        <div class="row-actions">
+          <button id="folder-button" class="ghost">Choose a folder</button>
+          <button id="encrypt-button" class="primary">Encrypt all</button>
+        </div>
       </div>
-      <p id="staged-note" class="muted hidden">Drop files above to add them here. Nothing is encrypted until you press Encrypt all.</p>
+      <input id="folder-input" type="file" webkitdirectory directory multiple hidden />
+      <p id="staged-note" class="muted hidden">Drop files or folders above to add them here. Nothing is encrypted until you press Encrypt all.</p>
+      <p id="locked-note" class="muted hidden">The locket is locked. Open it first to add or edit files.</p>
       <table id="staged-table" class="hidden">
         <thead>
           <tr><th>Name</th><th>Size</th></tr>

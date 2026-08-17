@@ -2,9 +2,8 @@
 
 const $ = (id) => document.getElementById(id);
 
-let accessToken = null;
-let refreshToken = null;
-let ownerName = null;
+let currentStatus = "open";
+let currentStagedCount = 0;
 
 const gateScreen = $("gate-screen");
 const appScreen = $("app-screen");
@@ -16,12 +15,19 @@ const nameField = $("name-field");
 const passField = $("pass-field");
 const dropZone = $("drop-zone");
 const fileInput = $("file-input");
+const folderInput = $("folder-input");
+const folderButton = $("folder-button");
+const dragNote = $("drag-note");
 const stagedBody = $("staged-body");
 const stagedTable = $("staged-table");
 const stagedNote = $("staged-note");
+const lockedNote = $("locked-note");
 const fileBody = $("file-body");
 const fileTable = $("file-table");
 const emptyNote = $("empty-note");
+const statusBadge = $("status-badge");
+const encryptButton = $("encrypt-button");
+const unloadButton = $("unload-button");
 const toastEl = $("toast");
 
 function toast(message) {
@@ -37,15 +43,42 @@ function formatSize(bytes) {
   return bytes + " B";
 }
 
+function folderDropSupported() {
+  return typeof DataTransferItem !== "undefined" && "webkitGetAsEntry" in DataTransferItem.prototype;
+}
+
+function readDir(entry, files, emptyDirs) {
+  return new Promise((resolve) => {
+    const reader = entry.createReader();
+    const readBatch = () => new Promise((res) => reader.readEntries(res, () => res([])));
+    (async () => {
+      const children = [];
+      let batch;
+      do {
+        batch = await readBatch();
+        children.push(...batch);
+      } while (batch.length);
+      let hadFile = false;
+      for (const child of children) {
+        if (child.isFile) {
+          const file = await new Promise((res) => child.file(res, () => res(null)));
+          if (file) {
+            files.push({ path: child.fullPath.replace(/^\//, ""), file });
+            hadFile = true;
+          }
+        } else if (child.isDirectory) {
+          const sub = await readDir(child, files, emptyDirs);
+          if (sub) hadFile = true;
+        }
+      }
+      if (!hadFile) emptyDirs.push(entry.fullPath.replace(/^\//, ""));
+      resolve(hadFile);
+    })();
+  });
+}
+
 async function api(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (accessToken) headers.set("Authorization", "Bearer " + accessToken);
-  const res = await fetch(path, { ...options, headers });
-  const xAccess = res.headers.get("X-Access-Token");
-  if (xAccess) {
-    accessToken = xAccess;
-    refreshToken = res.headers.get("X-Refresh-Token");
-  }
+  const res = await fetch(path, { ...options });
   if (res.status === 401 && !path.endsWith("/api/login")) {
     showGate(false);
     throw new Error("Session expired");
@@ -53,10 +86,32 @@ async function api(path, options = {}) {
   return res;
 }
 
+function renderStatus(status) {
+  currentStatus = status === "locked" ? "locked" : "open";
+  statusBadge.textContent = currentStatus === "locked" ? "Locked" : "Open";
+  statusBadge.className = "badge " + currentStatus;
+  dropZone.classList.toggle("locked", currentStatus === "locked");
+  lockedNote.classList.toggle("hidden", currentStatus !== "locked");
+  folderButton.disabled = currentStatus === "locked";
+}
+
 async function loadState() {
   const res = await fetch("/api/state");
   const data = await res.json();
-  showGate(!data.owned);
+  if (!data.owned) {
+    showGate(true);
+    return;
+  }
+  try {
+    const filesRes = await api("/api/files");
+    if (!filesRes.ok) {
+      showGate(false);
+      return;
+    }
+    enterApp(await filesRes.json());
+  } catch (err) {
+    showGate(false);
+  }
 }
 
 function showGate(showSetup) {
@@ -65,7 +120,6 @@ function showGate(showSetup) {
   nameLabel.classList.toggle("hidden", !showSetup);
   nameField.classList.toggle("hidden", !showSetup);
   gateButton.textContent = showSetup ? "Create my locket" : "Open my locket";
-  ownerName = showSetup ? null : "owner";
 }
 
 async function handleGateSubmit(e) {
@@ -98,9 +152,6 @@ async function handleGateSubmit(e) {
       gateError.classList.remove("hidden");
       return;
     }
-    const data = await res.json();
-    accessToken = data.access_token;
-    refreshToken = data.refresh_token;
     passField.value = "";
     enterApp();
   } catch (err) {
@@ -109,9 +160,10 @@ async function handleGateSubmit(e) {
   }
 }
 
-function enterApp() {
+function enterApp(files) {
   gateScreen.classList.add("hidden");
   appScreen.classList.remove("hidden");
+  if (files) renderStatus(files.status);
   loadFiles();
 }
 
@@ -120,7 +172,7 @@ function fillTable(tbody, rows) {
   for (const f of rows) {
     const row = document.createElement("tr");
     const nameCell = document.createElement("td");
-    nameCell.textContent = f.name;
+    nameCell.textContent = f.kind === "folder" ? f.name + "/" : f.name;
     const sizeCell = document.createElement("td");
     sizeCell.textContent = formatSize(f.size);
     row.append(nameCell, sizeCell);
@@ -133,28 +185,41 @@ async function loadFiles() {
   if (!res.ok) return;
   const data = await res.json();
 
+  renderStatus(data.status);
+  currentStagedCount = data.staged.length;
+
   const hasStaged = data.staged.length > 0;
   stagedNote.classList.toggle("hidden", hasStaged);
   stagedTable.classList.toggle("hidden", !hasStaged);
   fillTable(stagedBody, data.staged);
+  encryptButton.disabled = !hasStaged;
 
   const hasLocked = data.locked.length > 0;
   emptyNote.classList.toggle("hidden", hasLocked);
   fileTable.classList.toggle("hidden", !hasLocked);
   fillTable(fileBody, data.locked);
+  unloadButton.disabled = !hasLocked;
 }
 
-async function stageFiles(fileList) {
-  if (!fileList.length) return;
+async function stageFiles(files, emptyDirs) {
+  if (!files.length && !emptyDirs.length) return;
+  if (currentStatus === "locked") {
+    toast("The locket is locked — open it first to add files.");
+    return;
+  }
   const form = new FormData();
-  for (const file of fileList) form.append("files", file, file.name);
+  for (const { path, file } of files) form.append("files", file, path);
+  for (const dir of emptyDirs) form.append("dirs", dir);
   const res = await api("/api/stage", { method: "POST", body: form });
   if (!res.ok) {
-    toast("Could not add those files.");
+    let msg = "Could not add those files.";
+    try { const body = await res.json(); if (body.detail) msg = body.detail; } catch (err) { /* ignore */ }
+    toast(msg);
     return;
   }
   const data = await res.json();
-  toast(`Added ${data.staged.length} file${data.staged.length > 1 ? "s" : ""} to Locket Files. Press Encrypt all when ready.`);
+  const count = data.staged.length + data.dirs.length;
+  toast(`Added ${count} item${count > 1 ? "s" : ""} to Locket Files. Press Encrypt all when ready.`);
   loadFiles();
 }
 
@@ -165,47 +230,102 @@ async function encryptAll() {
   const lockedMsg = data.locked.length
     ? `Locked ${data.locked.length} file${data.locked.length > 1 ? "s" : ""}.`
     : "Nothing to lock.";
-  const skippedMsg = data.skipped.length
-    ? ` Skipped ${data.skipped.length} (already in the locket).`
+  const failedMsg = data.failed.length
+    ? ` Could not lock ${data.failed.length} (left in folder).`
     : "";
-  toast(lockedMsg + skippedMsg);
+  toast(lockedMsg + failedMsg);
   loadFiles();
 }
 
 async function unloadAll() {
-  const res = await api("/api/unload", { method: "POST" });
+  let clean = false;
+  if (currentStagedCount > 0) {
+    if (!confirm("The Locket Files folder isn't empty. Clear it and replace it with the vault contents?")) {
+      return;
+    }
+    clean = true;
+  }
+  const url = clean ? "/api/unload?clean=true" : "/api/unload";
+  const res = await api(url, { method: "POST" });
   if (!res.ok) return;
   const data = await res.json();
   toast(data.unloaded
     ? `Unlocked ${data.unloaded} file${data.unloaded > 1 ? "s" : ""} and opened the folder.`
     : "Nothing to unlock yet.");
+  loadFiles();
 }
 
-function logout() {
-  accessToken = null;
-  refreshToken = null;
-  showGate(false);
-}
-
-dropZone.addEventListener("click", () => fileInput.click());
+dropZone.addEventListener("click", () => {
+  if (currentStatus === "locked") {
+    toast("The locket is locked — open it first.");
+    return;
+  }
+  fileInput.click();
+});
 dropZone.addEventListener("dragover", (e) => {
+  if (currentStatus === "locked") return;
   e.preventDefault();
   dropZone.classList.add("dragging");
 });
 dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragging"));
-dropZone.addEventListener("drop", (e) => {
+dropZone.addEventListener("drop", async (e) => {
   e.preventDefault();
   dropZone.classList.remove("dragging");
-  stageFiles(e.dataTransfer.files);
+  if (currentStatus === "locked") {
+    toast("The locket is locked — open it first.");
+    return;
+  }
+  const files = [];
+  const emptyDirs = [];
+  const items = e.dataTransfer.items;
+  if (items && items.length && typeof items[0].webkitGetAsEntry === "function") {
+    for (const item of items) {
+      const entry = item.webkitGetAsEntry();
+      if (!entry) continue;
+      if (entry.isFile) {
+        const f = await new Promise((res) => entry.file(res, () => res(null)));
+        if (f) files.push({ path: entry.fullPath.replace(/^\//, ""), file: f });
+      } else if (entry.isDirectory) {
+        await readDir(entry, files, emptyDirs);
+      }
+    }
+  } else {
+    for (const f of e.dataTransfer.files) {
+      const rel = f.webkitRelativePath || f.name;
+      if (f.webkitRelativePath && !rel.includes("/")) continue;
+      files.push({ path: rel, file: f });
+    }
+  }
+  await stageFiles(files, emptyDirs);
 });
 fileInput.addEventListener("change", () => {
-  stageFiles(fileInput.files);
+  const files = [];
+  for (const f of fileInput.files) files.push({ path: f.name, file: f });
+  stageFiles(files, []);
   fileInput.value = "";
 });
+folderInput.addEventListener("change", () => {
+  const files = [];
+  for (const f of folderInput.files) {
+    const rel = f.webkitRelativePath;
+    if (!rel || !rel.includes("/")) continue;
+    files.push({ path: rel, file: f });
+  }
+  stageFiles(files, []);
+  folderInput.value = "";
+});
+folderButton.addEventListener("click", () => {
+  if (currentStatus === "locked") {
+    toast("The locket is locked — open it first.");
+    return;
+  }
+  folderInput.click();
+});
 
-$("encrypt-button").addEventListener("click", encryptAll);
-$("unload-button").addEventListener("click", unloadAll);
-$("logout-button").addEventListener("click", logout);
+encryptButton.addEventListener("click", encryptAll);
+unloadButton.addEventListener("click", unloadAll);
 gateForm.addEventListener("submit", handleGateSubmit);
+
+if (!folderDropSupported()) dragNote.classList.remove("hidden");
 
 loadState();

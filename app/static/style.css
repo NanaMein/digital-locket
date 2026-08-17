@@ -38,6 +38,27 @@ body {
 
 .brand.small { font-size: 1.1rem; }
 
+.badge {
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.badge.open {
+  background: #1f3d2b;
+  color: #7ee2a8;
+  border: 1px solid #2e5c40;
+}
+
+.badge.locked {
+  background: #3d2222;
+  color: #e2a7a7;
+  border: 1px solid #5c2e2e;
+}
+
 .tagline { color: var(--muted); margin-top: 0.4rem; }
 
 .card {
@@ -97,6 +118,11 @@ button.primary {
   margin: 0;
 }
 
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .error { color: var(--danger); font-size: 0.9rem; }
 
 .topbar {
@@ -120,6 +146,13 @@ button.primary {
   background: var(--panel);
 }
 
+.dropzone.locked {
+  border-color: var(--border);
+  background: var(--panel);
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .dropzone-title { margin: 0; font-size: 1.15rem; }
 
 .dropzone-hint { margin: 0.3rem 0 0; color: var(--muted); font-size: 0.9rem; }
@@ -132,6 +165,12 @@ button.primary {
 }
 
 .row h2 { margin: 0; font-size: 1.15rem; color: var(--muted); font-weight: 500; }
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
 
 .muted { color: var(--muted); }
 
