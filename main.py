@@ -1,9 +1,10 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app.core.lifespan import lifespan
 from app.routers import vault
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 app.include_router(vault.router)
 app.mount("/", StaticFiles(directory="app/static", html=True), name="static")
 

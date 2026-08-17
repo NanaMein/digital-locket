@@ -16,7 +16,8 @@ from fastapi import (
 from pydantic import BaseModel
 
 from app.core.logger import app_logger
-from app.core.tokens import ACCESS_TTL_SECONDS, REFRESH_TTL_SECONDS, TokenStore
+from app.core.paths import FILES_DIR, INDEX_FILE, OWNER_FILE, STATE_FILE, VAULTS_ROOT
+from app.core.tokens import ACCESS_TTL_SECONDS, REFRESH_TTL_SECONDS, token_store
 from app.services.lock_logic_service import (
     create_owner_marker,
     lock_folder_files,
@@ -25,15 +26,6 @@ from app.services.lock_logic_service import (
 )
 
 router = APIRouter()
-
-token_store = TokenStore()
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-FILES_DIR = PROJECT_ROOT.parent / "Locket Files"
-VAULTS_ROOT = PROJECT_ROOT / "vaults"
-OWNER_FILE = VAULTS_ROOT / ".owner.json"
-INDEX_FILE = VAULTS_ROOT / ".index.json"
-STATE_FILE = VAULTS_ROOT / ".state.json"
 
 ACCESS_COOKIE = "dl_access"
 REFRESH_COOKIE = "dl_refresh"
@@ -115,18 +107,27 @@ def _save_index(index: dict[str, int]) -> None:
     INDEX_FILE.write_text(json.dumps(index, indent=2))
 
 
-def _load_status() -> str:
+def _load_state() -> dict:
+    """Read .state.json, defaulting to an open, clean-on-startup state."""
     if STATE_FILE.is_file():
         try:
-            return json.loads(STATE_FILE.read_text()).get("status", "open")
+            data = json.loads(STATE_FILE.read_text())
+            if isinstance(data, dict):
+                return data
         except (json.JSONDecodeError, OSError):
             pass
-    return "open"
+    return {"status": "open", "clean": True}
+
+
+def _load_status() -> str:
+    return _load_state().get("status", "open")
 
 
 def _save_status(status: str) -> None:
+    state = _load_state()
+    state["status"] = status
     VAULTS_ROOT.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps({"status": status}, indent=2))
+    STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
 def _safe_relpath(raw: str) -> Path:
@@ -146,7 +147,8 @@ def _dir_size(path: Path) -> int:
 
 @router.get("/api/state")
 async def get_state():
-    return {"owned": OWNER_FILE.is_file(), "status": _load_status()}
+    state = _load_state()
+    return {"owned": OWNER_FILE.is_file(), "status": state.get("status", "open"), "clean": state.get("clean", True)}
 
 
 @router.post("/api/setup")

@@ -60,24 +60,55 @@ def verify_owner_marker(marker_b64: str, passphrase: str) -> bool:
     except ValueError:
         return False
 
-def shred_and_delete(file_path: Path):
+_SHRED_CHUNK_SIZE = 1024 * 1024
+
+
+def shred_and_delete(file_path: Path) -> bool:
+    """Overwrite the file's bytes in place with random data (1 MiB chunks) and fsync,
+    then delete it so consumer recovery tools (undelete / disk carving) cannot resurrect it.
+
+    Returns True when the file was overwritten and removed. On failure the file is left
+    in place — it is never deleted without being ruined.
     """
-    Overwrites the file contents with random garbage data ('ruining' it) 
-    before deleting, preventing recovery from Recycle Bin/disk carve tools.
+    if not file_path.is_file():
+        return False
+    file_size = file_path.stat().st_size
+    try:
+        with open(file_path, "r+b") as f:
+            remaining = file_size
+            while remaining > 0:
+                chunk = min(_SHRED_CHUNK_SIZE, remaining)
+                f.write(os.urandom(chunk))
+                remaining -= chunk
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        app_logger.warning("Could not securely shred %s: %s", file_path, e)
+        return False
+    file_path.unlink(missing_ok=True)
+    return True
+
+
+def shred_folder_contents(path: Path) -> int:
+    """Shred every file under path (deepest first) and prune the empty subdirectories.
+
+    The root folder itself is kept so it stays usable as the working area. Returns the
+    number of files shredded; files that could not be opened are left in place.
     """
-    if file_path.is_file():
-        file_size = file_path.stat().st_size
-        try:
-            with open(file_path, "wb") as f:
-                if file_size > 0:
-                    f.write(os.urandom(file_size))  # Overwrite with random bytes
-                f.flush()
-                os.fsync(f.fileno())
-        except Exception as e:
-            print(f"Warning: Could not securely shred {file_path}: {e}")
-        
-        # Delete the ruined file
-        file_path.unlink()
+    count = 0
+    if not path.is_dir():
+        return count
+    for child in sorted(path.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if child.is_file():
+            if shred_and_delete(child):
+                count += 1
+        elif child.is_dir():
+            try:
+                child.rmdir()
+            except OSError:
+                pass
+    return count
+
 
 def lock_files(source_dir: str, vault_dir: str, passphrase: str):
     """LOCK logic: Encrypts files, saves them to a vault, ruins & deletes originals."""
@@ -186,14 +217,7 @@ def _archive_dir(path: Path) -> tuple[int, bytes]:
 
 def _shred_tree(path: Path) -> None:
     """Shred every file under path (deepest first), then remove the empty directories."""
-    for child in sorted(path.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-        if child.is_file():
-            shred_and_delete(child)
-        elif child.is_dir():
-            try:
-                child.rmdir()
-            except OSError:
-                pass
+    shred_folder_contents(path)
     try:
         path.rmdir()
     except OSError:
@@ -327,7 +351,10 @@ def lock_folder_files(
                 app_logger.error("Failed to encrypt %s. %s", name, e)
                 failed.append(name)
                 continue
-            shred_and_delete(entry)
+            if not shred_and_delete(entry):
+                app_logger.warning("%s could not be shredded — left in place", name)
+                failed.append(name)
+                continue
             locked.append((name, len(plaintext)))
             app_logger.info("Locked %s", name)
         elif entry.is_dir():
