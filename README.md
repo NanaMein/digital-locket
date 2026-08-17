@@ -14,7 +14,7 @@ No tech skills needed. No terminal. No "install Python" steps. FastAPI runs the 
 2. **Add files or folders** — drag & drop them in (whole folders work), or pick files with the file chooser and folders with the **Choose a folder** button. They land in your **Locket Files** folder (on the USB, right next to the app) and wait there.
 3. **Encrypt all** — one button. Everything in the folder is encrypted into the vault, and only after each item succeeds is the original securely shredded. The vault always ends up holding exactly what was in the folder at that moment.
 4. **Later runs** — type your passphrase, see what's locked, and press **Open vault folder** to decrypt everything back into the Locket Files folder (Explorer opens right there). If the folder already has files, you're asked first and can choose to clear it so the freshly unloaded files always land.
-5. **Done for the day?** Just close the tab. Your browser keeps you signed in while the app keeps running, and the session expires on its own — and any restart of the machine locks everything again, so it stays protected even if the stick is lost.
+5. **Done for the day?** Just close the tab. Your browser keeps you signed in while the app keeps running, and the session expires on its own. On the next launch the app **shreds whatever is left in the Locket Files folder** — staged files, unloaded-but-edited files, anything placed there by hand — so only the encrypted vault survives a reboot, even if the stick is lost or stolen.
 
 The top bar always shows the state of the locket: **Open** means the folder is your editable working area, **Locked** means everything is sealed in the vault. While locked, the app blocks new drops and pickers and keeps the vault list in front — the vault is the source of truth.
 
@@ -27,7 +27,7 @@ USB root (E:\)
     └── vaults\        ← the encrypted store
         ├── .owner.json   (ownership marker)
         ├── .index.json   (original file sizes for the list)
-        ├── .state.json   (open / locked status)
+        ├── .state.json   (open / locked status + clean-on-startup flag)
         ├── <name>.enc            ← one encrypted file each
         └── folders\<name>.enc    ← one encrypted folder each
 ```
@@ -49,6 +49,7 @@ The Locket Files folder is your working area — you can even browse it directly
 - Sessions ride on short-lived opaque tokens stored in **HttpOnly cookies**: a 5-minute access token and a 30-minute refresh token. When the access expires, the refresh silently rotates both — and once 30 minutes pass without activity, the app quietly denies entry with a strict `401` and asks for the passphrase again. A wrong passphrase is always rejected with `401`.
 - Because the passphrase cache is in-memory only, any machine shutdown (or a different OS user) invalidates every session — a stolen USB + laptop stays locked.
 - The server binds to `127.0.0.1` — localhost only. Nothing on your network can reach it.
+- **Clean slate on startup**: every time the app launches it shreds everything in the Locket Files folder — overwriting each file's bytes with random data before deleting it — so no plaintext survives a reboot. The vault is never touched; it stays the only persistent copy. Set `"clean": false` in `vaults/.state.json` to skip the wipe during development.
 
 ## Running it (for developers)
 
@@ -74,7 +75,7 @@ Open http://127.0.0.1:8000 in your browser.
 - **API** (`app/routers/vault.py`): `GET /api/state` (public), `POST /api/setup`, `POST /api/login` (sets HttpOnly session cookies), `POST /api/stage` (multipart files with sanitized relative paths + `dirs` for empty folders; blocked with `409` while locked), `POST /api/encrypt` (locks folder → vault, vault mirrors the folder), `GET /api/files` (`staged` + `locked`, each tagged `kind: file|folder`, plus `status`), `POST /api/unload?clean=true` (empties the folder first, decrypts, opens Explorer). Every route except `state`/`setup`/`login` requires a valid session.
 - **Encrypt is always fresh**: re-encrypting overwrites any previous blob and removes stale ones whose file is gone from the folder — the vault is a mirror, never a cache of old versions. An empty folder is a no-op and never wipes the vault. Failed items stay in the folder, never shredded.
 - **Auth** (`app/core/tokens.py`): in-memory LRU `TokenStore` — the only place the passphrase ever lives. Access 5 min, refresh 30 min, rotation on access expiry; tokens travel in HttpOnly `SameSite=Lax` cookies (`dl_access`/`dl_refresh`).
-- **Status** (`vaults/.state.json`): `open` = editable working area, `locked` = everything sealed. `setup` and `unload` set `open`; a non-empty `encrypt` sets `locked`.
+- **Status** (`vaults/.state.json`): `{"status": "open" | "locked", "clean": true | false}`. `open` = editable working area, `locked` = everything sealed. `setup` and `unload` set `open`; a non-empty `encrypt` sets `locked`; `clean` controls the startup wipe (default `true`). The wipe lives in `app/core/lifespan.py`: on startup it shreds everything in Locket Files (keeping the folder), syncs status to `locked` when the vault holds content, and clears the in-memory passphrase store on start and shutdown.
 - **UI** (`app/static/`): plain vanilla JS, no build step. Reloads stay signed in while the process is alive; the topbar badge shows Open/Locked; while locked, drag & drop and pickers are blocked.
 
 ## The end goal: plug-and-play
@@ -83,7 +84,7 @@ The long-term plan is a USB "digital locket": Python and this app bundled onto t
 
 ## Current status
 
-Working today: owner setup, passphrase login with expiring HttpOnly-cookie sessions, files **and folders** staging (drag & drop + picker), one-button fresh encryption with mirror cleanup, folder-aware file listing, clean-before-unload, and vault unload that opens Explorer. Not yet done: the USB auto-start packaging and hardened error handling.
+Working today: owner setup, passphrase login with expiring HttpOnly-cookie sessions, files **and folders** staging (drag & drop + picker), one-button fresh encryption with mirror cleanup, folder-aware file listing, clean-before-unload, vault unload that opens Explorer, and a clean-slate startup wipe so plaintext never survives a reboot. Not yet done: the USB auto-start packaging and hardened error handling.
 
 ## Tech stack
 
