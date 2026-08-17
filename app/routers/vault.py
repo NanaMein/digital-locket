@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 from typing import Annotated
-
+from anyio.to_thread import run_sync
 import anyio
 from fastapi import (
     APIRouter,
@@ -202,7 +202,7 @@ async def stage_files(
 
 @router.post("/api/encrypt")
 async def encrypt_staged(auth: Annotated[str, Depends(get_auth)]):
-    locked, failed = await anyio.to_thread.run_sync(
+    locked, failed = await run_sync(
         lock_folder_files, str(FILES_DIR), str(VAULTS_ROOT), auth
     )
     index = _load_index()
@@ -247,10 +247,10 @@ async def unload(
     clean: bool = False,
 ):
     FILES_DIR.mkdir(parents=True, exist_ok=True)
-    unloaded, skipped = await anyio.to_thread.run_sync(
+    unloaded, skipped = await run_sync(
         unload_files, str(VAULTS_ROOT), str(FILES_DIR), auth, clean
     )
-    await anyio.to_thread.run_sync(os.startfile, str(FILES_DIR))
+    await run_sync(os.startfile, str(FILES_DIR))
     app_logger.info("Unloaded %d files to %s", unloaded, FILES_DIR)
     _save_status("open")
     return {"unloaded": unloaded, "skipped": skipped, "folder": str(FILES_DIR)}
