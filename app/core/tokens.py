@@ -36,6 +36,10 @@ class TokenStore:
         self._refresh_ttl = refresh_ttl
         self._tokens: OrderedDict[str, _Entry] = OrderedDict()
 
+    def clear(self) -> None:
+        """Drop every session, releasing the passphrase from memory."""
+        self._tokens.clear()
+
     def _now(self) -> float:
         return time.monotonic()
 
@@ -104,3 +108,6 @@ class TokenStore:
             return None
         rotated = self._rotate(entry.session_id, entry.passphrase)
         return entry.passphrase, rotated
+
+
+token_store = TokenStore()
