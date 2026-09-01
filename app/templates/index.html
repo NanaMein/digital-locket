@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Secure Crypto App</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Welcome!</h1>
+        <p>Please enter your passphrase to continue.</p>
+        <form action="/api/auth/init-session-v1" method="POST">
+            <input type="password" name="passphrase" placeholder="Enter Passphrase" required>
+            <button type="submit">Unlock</button>
+        </form>
+    </div>
+</body>
+</html>

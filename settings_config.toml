@@ -1,0 +1,8 @@
+[folders]
+my_personal_folder = "my_secret_folder"
+my_vault = "my_vault"
+
+
+[directories]
+working_directory = "my_secret_folder"
+secret_vault_directory = "my_vault"

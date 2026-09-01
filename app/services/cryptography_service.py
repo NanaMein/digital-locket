@@ -8,6 +8,17 @@ import io
 
 load_dotenv()
 
+class ConfigResources:
+    separator = b"---80f8a4b0-0b4b-4623-ba12-0a711208f7b0---"
+    input_dir = Path("my_secrets")
+    vault_dir = Path("the_vault")
+    master_vault_file = vault_dir / "master.vault"
+    validation_file = vault_dir / "validation.vault"
+    secrets_dir = Path("unlock_secrets")
+
+config = ConfigResources()
+
+
 class LockResources:
     separator = b"---80f8a4b0-0b4b-4623-ba12-0a711208f7b0---"
     input_dir = Path("my_secrets")
@@ -212,6 +223,51 @@ class EncryptFileService:
 
         except Exception as ex:
             raise ex
+
+    def check_my_files(self, passphrase):
+        if not self.lock_resources.validation_file.exists() or not self.lock_resources.output_file.exists():
+            return False
+        try:
+            self._check_validation_vault(passphrase)
+            return True
+        except (InvalidToken, Exception):
+            return False
+
+    def check_vaults(self, passphrase):
+        if not self.lock_resources.validation_file.exists():
+            salt = os.urandom(16)
+            self._create_canary_vault(passphrase, salt)
+
+
+
+
+
+class DecryptFileService:
+    def __init__(self, derive_key_service: DeriveKeyService):
+        self._derive_key_service = derive_key_service
+
+    def unlock_my_files(self, passphrase):
+
+        data = config.master_vault_file.read_bytes()
+        salt, encrypted = data[:16], data[16:]
+
+        key = self._derive_key_service.get_key(passphrase, salt)
+
+        decrypted = Fernet(key).decrypt(encrypted)
+
+        parts = decrypted.split(config.separator)
+
+        count = 0
+
+        for i in range(1, len(parts), 2):
+            name = parts[i].decode()
+            content = parts[i + 1]
+            file_path = config.secrets_dir / name
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(content)
+            count += 1
+        print(f"🔓 Restored {count} files → {config.secrets_dir}/")
+
 
 
 

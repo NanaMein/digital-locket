@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Crypto Dashboard</h1>
+
+        <div class="sections">
+            <!-- Encrypt Section -->
+            <div class="section">
+                <h2>Encrypt</h2>
+                <form action="/encrypt" method="POST">
+                    <textarea name="text" placeholder="Text to encrypt..."></textarea>
+                    <button type="submit">Encrypt</button>
+                </form>
+            </div>
+
+            <!-- Decrypt Section -->
+            <div class="section">
+                <h2>Decrypt</h2>
+                <form action="/decrypt" method="POST">
+                    <textarea name="text" placeholder="Text to decrypt..."></textarea>
+                    <button type="submit">Decrypt</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
