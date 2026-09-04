@@ -1,13 +1,13 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+
 from app.core.lifespan import lifespan
-from app.routers.auth import router as auth_router
+from app.routers import vault
 
+app = FastAPI(lifespan=lifespan)
+app.include_router(vault.router)
+app.mount("/", StaticFiles(directory="app/static", html=True), name="static")
 
-app = FastAPI(
-    lifespan=lifespan
-)
-app.include_router(auth_router)
-
-if "__main__" == __name__:
+if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=54321)
+    uvicorn.run(app, host="127.0.0.1", port=8000)

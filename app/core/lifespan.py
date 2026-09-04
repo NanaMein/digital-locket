@@ -1,205 +1,80 @@
+import json
 from contextlib import asynccontextmanager
+
+import anyio
 from fastapi import FastAPI
-from cachetools import TTLCache
-from datetime import timedelta
-from pydantic import BaseModel, Field
-from app.core.config import get_settings_instance
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from pathlib import Path
-from app.core.state import app_state
+
+from app.core.logger import app_logger
+from app.core.paths import FILES_DIR, STATE_FILE, VAULTS_ROOT
+from app.core.tokens import token_store
+from app.services.lock_logic_service import shred_folder_contents
 
 
-
-class StartupStatus(BaseModel):
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(ZoneInfo("Asia/Manila")))
-    working_directory: str = "pending"
-    vault_directory: str = "pending"
-
-    initial_user_status: str = "pending"
-
-
-
-class StartupStateManagement:
-    def __init__(self):
-        self._original_status = None
-        self._updated_status = None
-        self.settings = get_settings_instance()
+def _load_state() -> dict:
+    if STATE_FILE.is_file():
+        try:
+            data = json.loads(STATE_FILE.read_text())
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"status": "open", "clean": True}
 
 
-    @property
-    def updated_status(self):
-        if self._updated_status is None:
-            _startup_object = StartupStatus()
-            self._original_status = _startup_object
-            self._updated_status = _startup_object.model_copy()
-        return self._updated_status
+def _save_state(state: dict) -> None:
+    VAULTS_ROOT.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2))
 
-    def generate_updated_status(self):
-        self.working_directory_status_update()
-        self.vault_directory_status_update()
-        self.user_status_update()
-        return self.updated_status
 
-    @staticmethod
-    def generate_updated_status_v1():
-        ssm = StartupStateManagement()
-        ssm.working_directory_status_update()
-        ssm.vault_directory_status_update()
-        ssm.user_status_update()
-        return ssm.updated_status
-
-    @staticmethod
-    def _create_new_directory(file: Path):
-        if not file.is_dir():
-            file.mkdir(parents=True, exist_ok=True)
-            test_file = file / ".write_test"
-            test_file.touch()
-            test_file.unlink()
-            return True
+def _vault_has_content() -> bool:
+    if not VAULTS_ROOT.is_dir():
         return False
-
-    def working_directory_status_update(self):
-        is_created = self._create_new_directory(file=self.settings.working_dir)
-        if is_created:
-            self.updated_status.working_directory = "NEW"
-
-        else:
-            self.updated_status.working_directory = "OLD"
-
-        return self
-
-    def vault_directory_status_update(self):
-        secret_vault_path = self.settings.secret_vault_storage
-
-        if secret_vault_path.is_dir():
-            if any(secret_vault_path.iterdir()):
-                _status = "OLD"
-            else:
-                _status = "EMPTY"
-        else:
-            is_created = self._create_new_directory(file=secret_vault_path)
-            _status = "NEW" if is_created else "FAILED"
-
-        self.updated_status.vault_directory = _status
-        return self
-
-    def user_status_update(self):
-        vault_dir = self.updated_status.vault_directory
-
-        if vault_dir == "OLD":
-            user_stat = "EXISTING_USER"
-
-        elif vault_dir == "NEW":
-            user_stat = "NEW_USER"
-
-        else:
-            raise RuntimeError("User Error unknown")
-
-        self.updated_status.initial_user_status = user_stat
-        return self
+    if any(VAULTS_ROOT.glob("*.enc")):
+        return True
+    folders_vault = VAULTS_ROOT / "folders"
+    return folders_vault.is_dir() and any(folders_vault.iterdir())
 
 
-class StartupStateManagementV1:
-    def __init__(self, startup_status: StartupStatus):
-        self._startup_status = startup_status
-        self.settings = get_settings_instance()
+def _run_startup_wipe() -> None:
+    """Clean-slate the plaintext folder on boot: shred every file in Locket Files.
 
-    @property
-    def generate_updated_status(self):
-        self.working_directory_status_update()
-        self.vault_directory_status_update()
-        self.user_status_update()
-        return self._startup_status
-
-    @staticmethod
-    def _create_new_directory(file: Path):
-        if not file.is_dir():
-            file.mkdir(parents=True, exist_ok=True)
-            test_file = file / ".write_test"
-            test_file.touch()
-            test_file.unlink()
-            return True
-        return False
-
-    def working_directory_status_update(self):
-        is_created = self._create_new_directory(file=self.settings.working_dir)
-        if is_created:
-            self._startup_status.working_directory = "NEW"
-
-        else:
-            self._startup_status.working_directory = "OLD"
-
-        return self
-
-    def vault_directory_status_update(self):
-        secret_vault_path = self.settings.secret_vault_storage
-
-        if secret_vault_path.is_dir():
-            if any(secret_vault_path.iterdir()):
-                _status = "OLD"
-            else:
-                _status = "EMPTY"
-        else:
-            is_created = self._create_new_directory(file=secret_vault_path)
-            _status = "NEW" if is_created else "FAILED"
-
-        self._startup_status.vault_directory = _status
-        return self
-
-    def user_status_update(self):
-        vault_dir = self._startup_status.vault_directory
-
-        if vault_dir == "OLD":
-            user_stat = "EXISTING_USER"
-
-        elif vault_dir == "NEW":
-            user_stat = "NEW_USER"
-
-        else:
-            raise RuntimeError("User Error unknown")
-
-        self._startup_status.initial_user_status = user_stat
-        return self
-
-
-def time_to_live_cache(
-        days: float| None = None,
-        hours: float| None = None,
-        minutes: float| None = None,
-):
-    _time = {}
-    if days:
-        _time["days"] = days
-    if hours:
-        _time["hours"] = hours
-    if minutes:
-        _time["minutes"] = minutes
-
-    if not _time:
-
-        raise TypeError("time_to_live_cache requires either days, hours, or minutes")
-
-    _time_set = timedelta(**_time).total_seconds()
-
-    return TTLCache(maxsize=1, ttl=_time_set)
-
-
-
+    The vault is never touched — it stays the only persistent, encrypted copy. Status is
+    synced to 'locked' when the vault holds anything (folder is now empty, vault is the
+    source of truth), otherwise 'open'. Skipped entirely when state 'clean' is false.
+    """
+    state = _load_state()
+    if not state.get("clean", True):
+        app_logger.info("Startup wipe skipped (clean=false in %s)", STATE_FILE.name)
+        return
+    if not FILES_DIR.is_dir():
+        return
+    count = shred_folder_contents(FILES_DIR)
+    if count:
+        app_logger.warning(
+            "Startup security wipe: shredded %d file(s) from %s", count, FILES_DIR.name
+        )
+    state["status"] = "locked" if _vault_has_content() else "open"
+    _save_state(state)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.access_cache = time_to_live_cache(minutes=5)
-    app.state.refresh_cache = time_to_live_cache(hours=2)
+    """Bind the passphrase store and plaintext folder to the process lifetime.
 
-    _startup_status = StartupStateManagement().generate_updated_status()
-    app.state.startup_status = _startup_status
-    app_state.user_status = _startup_status.initial_user_status
-
-
+    Startup: start with a clean in-memory token store (no passphrase from a previous run),
+    then shred anything left in Locket Files so only encrypted vault copies survive a reboot.
+    Shutdown: release the passphrase store from RAM before the process exits.
+    """
+    token_store.clear()
+    await anyio.to_thread.run_sync(_run_startup_wipe)
+    state = _load_state()
+    app_logger.info(
+        "Locket started (status=%s, clean=%s)",
+        state.get("status", "open"),
+        state.get("clean", True),
+    )
     try:
         yield
     finally:
-        app.state.access_cache.clear()
-        app.state.refresh_cache.clear()
+        token_store.clear()
+        app_logger.info("Locket stopped - passphrase store released")

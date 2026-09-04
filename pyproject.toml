@@ -1,14 +1,20 @@
 [project]
-name = "plug-and-play-password-manager"
+name = "digital-locket-lite"
 version = "0.1.0"
-requires-python = ">=3.13"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
 dependencies = [
     "argon2-cffi>=25.1.0",
-    "cachetools>=7.1.4",
-    "cryptography>=48.0.1",
-    "fastapi>=0.137.2",
-    "jinja2>=3.1.6",
-    "python-dotenv>=1.2.2",
+    "cryptography>=50.0.0",
+    "fastapi>=0.141.1",
     "python-multipart>=0.0.32",
-    "uvicorn>=0.49.0",
+    "tzdata>=2026.3",
+    "uvicorn>=0.52.1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "ruff>=0.16.2",
 ]
